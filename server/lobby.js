@@ -60,6 +60,22 @@ export function normaliseCode(s) {
   return typeof s === 'string' ? s.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, CODE_LEN) : '';
 }
 
+/**
+ * Refuse a connection with a reason that reaches the player.
+ *
+ * The message goes out as an ordinary text frame BEFORE the close, because a
+ * close frame does not survive a TLS proxy (see `route`). Data frames do.
+ * Always returns null so callers can `return refuse(...)` in one line.
+ */
+function refuse(conn, code, reason) {
+  // A peer that has already gone away must not turn a refusal into a throw.
+  try {
+    conn.send(JSON.stringify({ t: 'error', code, reason }));
+  } catch { /* already closed; the close below is still correct */ }
+  conn.close(code, reason);
+  return null;
+}
+
 /** Match names are listed to strangers: printable, trimmed, bounded. */
 function cleanLabel(v, dflt) {
   if (typeof v !== 'string') return dflt;
@@ -155,20 +171,30 @@ export class Lobby {
    *
    * Every refusal closes with a distinct code so the client can say something
    * true: 1008 is "that code is wrong", 1013 is "this server is full".
+   *
+   * AND SENDS THE REASON AS A MESSAGE FIRST, because the close code does not
+   * survive the trip. MEASURED against the deployed host: a bad code that closes
+   * `1008 "no such room"` locally arrives at the browser as **1006 with an empty
+   * reason** once it has been through Render's TLS proxy — the proxy tears the
+   * socket down without relaying our close frame. `FATAL_CLOSE` in
+   * `src/net/index.js` does not contain 1006, so the client treated a refusal as
+   * an unreachable server, retried the backoff ramp, and told the player
+   * "unreachable" instead of "that code is wrong".
+   *
+   * 1006 must NOT simply be added to that set: it is also what a genuinely
+   * unreachable host produces, which on a free tier that sleeps is the ordinary
+   * cold-start path, and making it fatal would kill the retry that exists to ride
+   * that out. A normal data frame relays fine, so the reason travels as one.
    */
   route(conn, req) {
     const url = typeof req?.url === 'string' ? req.url : '/';
-    if (url.length > MAX_URL) {
-      conn.close(1009, 'url too long');
-      return null;
-    }
+    if (url.length > MAX_URL) return refuse(conn, 1009, 'url too long');
 
     let params;
     try {
       params = new URLSearchParams(url.slice(url.indexOf('?') + 1 || url.length));
     } catch {
-      conn.close(1008, 'bad request');
-      return null;
+      return refuse(conn, 1008, 'bad request');
     }
 
     const raw = params.get('room');
@@ -176,15 +202,9 @@ export class Lobby {
       const code = normaliseCode(raw);
       // Validate the SHAPE before the lookup, so a hostile string never even
       // becomes a Map key, and an unknown-but-valid code is a clean refusal.
-      if (!isCode(code)) {
-        conn.close(1008, 'bad code');
-        return null;
-      }
+      if (!isCode(code)) return refuse(conn, 1008, 'bad code');
       const room = this.rooms.get(code);
-      if (!room) {
-        conn.close(1008, 'no such room');
-        return null;
-      }
+      if (!room) return refuse(conn, 1008, 'no such room');
       room.attach(conn);
       return room;
     }
@@ -196,10 +216,7 @@ export class Lobby {
         maxPlayers: params.get('max'),
         isPrivate: params.get('private') === '1',
       });
-      if (!room) {
-        conn.close(1013, 'server at capacity');
-        return null;
-      }
+      if (!room) return refuse(conn, 1013, 'server at capacity');
       room.attach(conn);
       return room;
     }
