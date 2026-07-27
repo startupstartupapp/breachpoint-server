@@ -1,0 +1,13 @@
+{
+  "name": "breachpoint-server",
+  "version": "1.0.0",
+  "description": "BREACHPOINT authoritative game server — 30 Hz sim host. Node built-ins only.",
+  "type": "module",
+  "private": false,
+  "license": "ISC",
+  "scripts": {
+    "start": "node server/index.js",
+    "server": "node server/index.js --port=8090"
+  },
+  "engines": { "node": ">=20" }
+}
